@@ -40,6 +40,7 @@ def prepare_loss_input(
     context_parallel_group: Optional[torch.distributed.ProcessGroup] = None,
     sampling_params: Optional[TrainingSamplingParams] = None,
     d2t: Optional[torch.Tensor] = None,
+    chunk_size: Optional[int] = None,
 ) -> tuple[dict[str, Any], BatchedDataDict[Any]]:
     """Prepare loss input for a loss function.
 
@@ -80,6 +81,7 @@ def prepare_loss_input(
                 vocab_parallel_group=vocab_parallel_group,
                 context_parallel_group=context_parallel_group,
                 sampling_params=sampling_params,
+                chunk_size=chunk_size,
             )
 
         # handle top-k/top-p filtering for logprobs, only used for ClippedPGLossFn now
@@ -102,6 +104,7 @@ def prepare_loss_input(
                     vocab_parallel_group=vocab_parallel_group,
                     context_parallel_group=context_parallel_group,
                     sampling_params=None,  # no filtering
+                    chunk_size=chunk_size,
                 )
 
         loss_input = {"next_token_logprobs": logprobs}
@@ -225,6 +228,7 @@ def prepare_packed_loss_input(
     vocab_parallel_group: Optional[torch.distributed.ProcessGroup] = None,
     context_parallel_group: Optional[torch.distributed.ProcessGroup] = None,
     sampling_params: Optional[TrainingSamplingParams] = None,
+    chunk_size: Optional[int] = None,
 ) -> tuple[dict[str, Any], BatchedDataDict[Any]]:
     """Prepare loss input from packed logits in a single fused pass.
 
@@ -295,6 +299,7 @@ def prepare_packed_loss_input(
         cp_group=context_parallel_group,
         sampling_params=sampling_params,
         target_is_pre_rolled=True,
+        chunk_size=chunk_size,
     )
 
     # Match prepare_loss_input behavior for top-k/top-p filtered training:
@@ -320,6 +325,7 @@ def prepare_packed_loss_input(
                     cp_group=context_parallel_group,
                     sampling_params=None,
                     target_is_pre_rolled=True,
+                    chunk_size=chunk_size,
                 )
             )
 

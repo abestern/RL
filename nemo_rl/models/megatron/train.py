@@ -365,9 +365,14 @@ class LossPostProcessor:
         Returns:
             Callable: Function that takes output tensor and returns (loss, metrics) tuple
         """
-        # wrap prepare_loss_input with sampling_params and optional d2t mapping
+        # wrap prepare_loss_input with sampling_params, optional d2t mapping,
+        # and logprob_chunk_size to bound peak memory in the training loss path
+        logprob_chunk_size = self.cfg.get("logprob_chunk_size", None)
         prepare_loss_input_wrapped = partial(
-            prepare_loss_input, sampling_params=self.sampling_params, d2t=self.d2t
+            prepare_loss_input,
+            sampling_params=self.sampling_params,
+            d2t=self.d2t,
+            chunk_size=logprob_chunk_size,
         )
 
         # wrap loss function with loss input preparation
@@ -377,7 +382,9 @@ class LossPostProcessor:
             if fuse_loss:
                 wrapper_cls = SequencePackingFusionLossWrapper
                 prepare_fn = partial(
-                    prepare_packed_loss_input, sampling_params=self.sampling_params
+                    prepare_packed_loss_input,
+                    sampling_params=self.sampling_params,
+                    chunk_size=logprob_chunk_size,
                 )
             else:
                 wrapper_cls = SequencePackingLossWrapper
