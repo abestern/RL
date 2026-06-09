@@ -414,11 +414,97 @@ class BaseVllmGenerationWorker:
 
             logger.info("Successfully patched hermes tool parser for thread-safety.")
 
+        def _patch_vllm_gpu_worker_local_rank():
+            """Fix vLLM v1 multi-engine-per-node physical GPU collision.
+
+            When NeMo-RL launches the vLLM workers it sets num_gpus=0 and
+            RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1 so vLLM (not Ray)
+            owns device placement. With vLLM 0.20.0's V1 engine, however,
+            CUDA_VISIBLE_DEVICES is no longer honored in time inside
+            ``Worker.init_device``: every co-resident engine sees all GPUs on
+            the node (``torch.accelerator.device_count() == 8``) and selects
+            ``cuda:{local_rank}`` with local_rank in {0..tp-1} *per engine*. So
+            all engines collapse onto the same first physical GPUs -> the first
+            engine reserves ~gpu_memory_utilization of those GPUs and every
+            other co-resident engine OOMs at the init MemorySnapshot.
+
+            Fix: when CVD is clearly not restricting visibility
+            (device_count() > local_world_size), remap ``self.local_rank`` to the
+            worker's absolute Ray-assigned physical GPU id (``ray.get_gpu_ids()[0]``)
+            so ``cuda:{local_rank}`` addresses the correct distinct GPU. Also widen
+            CUDA_VISIBLE_DEVICES to the full node range so downstream
+            ``device_ids[device.index]`` lookups (e.g. custom_all_reduce) stay
+            consistent with the absolute indexing torch is now using. No-op when
+            CVD is honored (device_count() == local_world_size).
+            """
+            try:
+                file_to_patch = _get_vllm_file("v1/worker/gpu_worker.py")
+            except RuntimeError:
+                logger.warning(
+                    "Could not locate v1/worker/gpu_worker.py for local_rank patch."
+                )
+                return
+
+            with open(file_to_patch, "r") as f:
+                content = f.read()
+
+            if "AEVOM-FIX local_rank remap" in content:
+                logger.info("gpu_worker local_rank remap patch already applied.")
+                return
+
+            anchor = '            self.device = torch.device(f"cuda:{self.local_rank}")'
+            if anchor not in content:
+                logger.warning(
+                    "Could not apply gpu_worker local_rank patch: expected anchor "
+                    "not found in %s. The vLLM version may have changed.",
+                    file_to_patch,
+                )
+                return
+
+            new_block = (
+                "            # AEVOM-FIX local_rank remap: avoid multi-engine-per-node\n"
+                "            # physical GPU collisions when CUDA_VISIBLE_DEVICES is not\n"
+                "            # honored (vLLM 0.20.0 V1 + NOSET + num_gpus=0).\n"
+                "            import ray as _afix_ray\n"
+                "            import os as _afix_os\n"
+                "            try:\n"
+                "                _afix_gpu_ids = list(_afix_ray.get_gpu_ids())\n"
+                "            except Exception:\n"
+                "                _afix_gpu_ids = []\n"
+                "            if (\n"
+                "                _afix_gpu_ids\n"
+                "                and torch.accelerator.device_count()\n"
+                "                > self.parallel_config.local_world_size\n"
+                "            ):\n"
+                "                _afix_old = self.local_rank\n"
+                "                self.local_rank = int(_afix_gpu_ids[0])\n"
+                "                _afix_n = torch.accelerator.device_count()\n"
+                '                _afix_os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(\n'
+                "                    str(_afix_i) for _afix_i in range(_afix_n)\n"
+                "                )\n"
+                "                logger.info(\n"
+                '                    "[AEVOM-FIX] remap local_rank %s -> physical %s; "\n'
+                '                    "CVD->range(%s) lws=%s",\n'
+                "                    _afix_old,\n"
+                "                    self.local_rank,\n"
+                "                    _afix_n,\n"
+                "                    self.parallel_config.local_world_size,\n"
+                "                )\n" + anchor
+            )
+
+            content = content.replace(anchor, new_block, 1)
+
+            with open(file_to_patch, "w") as f:
+                f.write(content)
+
+            logger.info("Successfully patched gpu_worker local_rank remap.")
+
         _patch_vllm_init_workers_ray()
         logger.info("Successfully patched vllm _init_workers_ray.")
 
         _patch_vllm_llama_eagle3_own_lm_head()
         _patch_vllm_hermes_tool_parser_thread_safety()
+        _patch_vllm_gpu_worker_local_rank()
 
         try:
             import vllm
