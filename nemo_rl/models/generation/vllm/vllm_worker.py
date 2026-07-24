@@ -630,6 +630,19 @@ class BaseVllmGenerationWorker:
                 )
             self.cfg["vllm_cfg"]["skip_tokenizer_init"] = False
 
+        # [BATCH-INVARIANT] The pinned flashinfer (0.6.8.post1) predates the
+        # allreduce_fusion(weight_bias=...) signature that vLLM 0.23's
+        # fuse_allreduce_rms compile pass expects, so cudagraph builds crash with
+        # "allreduce_fusion() got an unexpected keyword argument 'weight_bias'".
+        # Disable that pass via an explicitly-passed compilation_config (a plain
+        # dict, so vLLM's config parser accepts it). It is safe to drop: batch-
+        # invariance already forces disable_custom_all_reduce=True, so the fused
+        # allreduce is unused. Scoped to the batch-invariant experiment. Verified by
+        # the 1-node EAGER=0 probe (bit-identical cross-instance logprobs).
+        if os.environ.get("VLLM_BATCH_INVARIANT") == "1":
+            _cc = vllm_kwargs.setdefault("compilation_config", {})
+            _cc.setdefault("pass_config", {})["fuse_allreduce_rms"] = False
+
         llm_kwargs = dict(
             model=self.model_name,
             served_model_name=self.model_name,
